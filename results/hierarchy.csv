@@ -1,0 +1,1 @@
+label,status,exit_code,hier_build_s,parse_s,atlas_s,merge_s,dump_s,hier_wall_s,hier_peak_rss_kb,hier_peak_rss_gib,landscape_bytes,text_index_bytes,kcsidx3_bytes,land_over_C0_bytes,merges,persist,C0_from_landscape,validation,extract_bitexact,extract_speedup_x,q8_exact,q8_work_x,C0_from_screen,machine_id,landscape_sha256,utc,loadavg_start,loadavg_end

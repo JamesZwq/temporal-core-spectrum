@@ -1,0 +1,8 @@
+bin/
+*.o
+*.strm
+*.kcsidx3
+*.kcsb
+data/
+__pycache__/
+.DS_Store
