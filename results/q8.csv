@@ -1,2 +1,0 @@
-label,index_bytes,status,rc,wall_s,peak_rss_kb,peak_rss_gib,out_bytes,cap_s,rss_trend,utc,machine_id,note
-YT,1827245335,TIMEOUT,124,10:00.34,5614796,5.355,0,600,growing:5242616->5614796,2026-08-19T12:32:13Z,ae04d236321b440db4491d279c0530de,probe-only; q8 previously produced 0 bytes twice (old driver, and orphan killed 05:13Z)
