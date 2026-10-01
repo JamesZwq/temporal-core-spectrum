@@ -1,7 +1,5 @@
 // KCS — Kinetic Certificate Sweep for the complete temporal (k,Δ)-core coreness spectrum.
 //
-// Theory: theory/KCS-kinetic-certificate-sweep.md
-//         theory/spectrum-theory.md
 //   - seed x = c_inf (Lemma 1.1 static multigraph core when Dmax >= Delta_core*)
 //   - top-down sweep drives the chaotic iteration of Thm 5.5; Cor 5.6 exactness
 //   - Stage 0 (--hist): histogram scheduling (Thm 6.2 engine, ground-truth anchor)

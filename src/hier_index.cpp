@@ -219,26 +219,70 @@ static int coreAt(const Spectrum& S, size_t e, ll D){
 }
 
 /* ------------------------------------------------------------ per-level bucket build -- */
-struct Buckets { vector<size_t> loff; vector<int> bEdge; vector<ll> bOns; size_t C0=0; };
+/* The atlas has C0 entries, but every consumer walks it one level at a time, so it is
+   never materialised.  Buckets holds ONE level's (edge, onset) slice and produces the
+   next by shrinking it in place -- the rolling scheme hier_build.cpp already validated.
+   Level sets are nested (an edge lives in levels 1..efin[e]), so walking k upward only
+   ever removes edges; and an onset changes only at that edge's own breakpoints, so a
+   per-edge cursor that only advances pays m insertions + B updates across the whole
+   sweep instead of C0 stores.  Peak residency drops from 12*C0 bytes to O(m); the work
+   stays O(C0) -- every level is still produced and consumed exactly as before.
+   loff/C0 are still counted up front (O(m+B) interval increments), both for the
+   reports and as an independent per-level cross-check on the rolling slice. */
+struct Buckets {
+    vector<size_t> loff; size_t C0=0;
+    int curK=0;                       // level currently held in le/lo (0 = none yet)
+    vector<int> le;                   // the level's edges, ascending
+    vector<ll>  lo;                   // their onsets at level curK
+    vector<u64> cur;                  // per-edge cursor into its breakpoint curve
+    const Spectrum* sp=nullptr;
+    void advanceTo(int k);            // roll the slice forward; k may only go up
+};
 static void buildBuckets(const Spectrum& S, Buckets& B){
     int K=S.maxcore; size_t m=S.m;
-    vector<size_t> lcount(K+2,0);
+    B.sp=&S;
+    /* the old counting pass, restated as interval increments: an edge enters levels
+       [1, min(base,K)] at onset 0 and [prev+1, min(val,K)] at each breakpoint */
+    vector<size_t> add(K+3,0), sub(K+3,0);
     for(size_t e=0;e<m;++e){ int base=S.ebase[e], hi=base>K?K:base;
-        for(int k=1;k<=hi;++k) lcount[k]++;
+        if(hi>=1){ add[1]++; sub[hi+1]++; }
         int prev=base;
         for(size_t c=S.coff[e];c<S.coff[e+1];++c){ int val=S.curveV[c];
-            for(int k=(prev+1>1?prev+1:1);k<=val&&k<=K;++k) lcount[k]++; prev=val; } }
-    B.loff.assign(K+2,0);
-    for(int k=1;k<=K+1;++k) B.loff[k]=B.loff[k-1]+lcount[k-1];
-    B.C0=B.loff[K+1];
-    B.bEdge.resize(B.C0); B.bOns.resize(B.C0);
-    vector<size_t> fill(B.loff.begin(),B.loff.end());
-    for(size_t e=0;e<m;++e){ int base=S.ebase[e], hi=base>K?K:base;
-        for(int k=1;k<=hi;++k){ size_t p=fill[k]++; B.bEdge[p]=(int)e; B.bOns[p]=0; }
-        int prev=base;
-        for(size_t c=S.coff[e];c<S.coff[e+1];++c){ int val=S.curveV[c]; ll d=S.curveD[c];
-            for(int k=(prev+1>1?prev+1:1);k<=val&&k<=K;++k){ size_t p=fill[k]++; B.bEdge[p]=(int)e; B.bOns[p]=d; }
+            if(val<prev){ fprintf(stderr,"buckets: edge %zu has a non-monotone curve "
+                "(%d after %d); the rolling slice cannot reproduce the atlas\n",e,val,prev);
+                exit(1); }
+            int lo2=(prev+1>1?prev+1:1), hi2=(val>K?K:val);
+            if(hi2>=lo2){ add[lo2]++; sub[hi2+1]++; }
             prev=val; } }
+    B.loff.assign(K+2,0);
+    size_t lc=0;                                   // lcount[k-1], carried
+    for(int k=1;k<=K+1;++k){ lc+=add[k-1]; lc-=sub[k-1]; B.loff[k]=B.loff[k-1]+lc; }
+    B.C0=B.loff[K+1];
+}
+void Buckets::advanceTo(int k){
+    if(k<curK){ fprintf(stderr,"buckets: level %d requested after %d; the slice only "
+                "rolls upward\n",k,curK); exit(1); }
+    const Spectrum& S=*sp;
+    while(curK<k){
+        int kk=curK+1;
+        if(curK==0){                               // seed: every edge, cursor at its curve
+            le.resize(S.m); lo.resize(S.m); cur.resize(S.m);
+            for(size_t e=0;e<S.m;++e){ le[e]=(int)e; cur[e]=S.coff[e]; }
+        }
+        size_t w=0;
+        for(size_t i=0;i<le.size();++i){ int e=le[i];
+            if(S.efin[e]<kk) continue;             // dropped for good
+            ll o=0;
+            if(S.ebase[e]<kk){ u64 c=cur[e], ce=S.coff[e+1];
+                while(c<ce && S.curveV[c]<kk) ++c;
+                cur[e]=c; o = c<ce ? S.curveD[c] : -1; }
+            le[w]=e; lo[w]=o; ++w; }
+        le.resize(w); lo.resize(w);
+        curK=kk;
+        size_t want=loff[kk+1]-loff[kk];           // the counted atlas is the referee
+        if(w!=want){ fprintf(stderr,"buckets: level %d slice has %zu entries, counted "
+                     "%zu\n",kk,w,want); exit(1); }
+    }
 }
 
 /* ================================================================= build the index ==== */
@@ -253,16 +297,17 @@ static vector<u64>* UPAIR = nullptr;      // set when the U certificate is being
 static vector<u32>* UPAIRK = nullptr;     // the level each pair was accepted at (span study)
 static int UPAIRLVL = 0;
 
-static void buildLevel(const Spectrum& S, const Buckets& B, int k,
+static void buildLevel(const Spectrum& S, Buckets& B, int k,
                        vector<vector<pair<ll,int>>>& nodeact, vector<ll>& dk,
                        LevelTree& T){
-    size_t b0=B.loff[k], b1=B.loff[k+1]; size_t nk=b1-b0;
+    B.advanceTo(k);
+    size_t nk=B.le.size();
     T = LevelTree{};
     if(!nk) return;
 
-    /* leaf id 0..nk-1 in ascending edge order (the bucket is already built that way) */
-    vector<int> le(nk); vector<ll> lo(nk);
-    for(size_t i=0;i<nk;++i){ le[i]=B.bEdge[b0+i]; lo[i]=B.bOns[b0+i]; }
+    /* leaf id 0..nk-1 in ascending edge order (the rolling slice is already built that
+       way), consumed in place -- B is not touched again until the next advanceTo */
+    const vector<int>& le=B.le; const vector<ll>& lo=B.lo;
 
     /* index within the level, for the candidate scan */
     vector<int> touched;
@@ -409,7 +454,7 @@ static void buildLevel(const Spectrum& S, const Buckets& B, int k,
 }
 
 /* ====================================================================== main ========= */
-static void writeIndex(const Spectrum& S, const Buckets& B, const char* out){
+static void writeIndex(const Spectrum& S, Buckets& B, const char* out){
     int K=S.maxcore;
     vector<LevelTree> T(K+1);
     vector<vector<pair<ll,int>>> nodeact(S.maxnode+1);
@@ -684,6 +729,8 @@ int main(int argc,char** argv){
         vector<vector<pair<ll,int>>> nodeact(S.maxnode+1); vector<ll> dkv(S.m,-1);
         int KQ[6]; for(int i=0;i<6;++i){ int k=1+(int)((ll)i*(K-1)/5); KQ[i]=(k<1?1:(k>K?K:k)); }
         vector<vector<ll>> gridW(6);                       // merge radii of the sampled levels
+        vector<vector<int>> gridE(6);                      // their edge lists (the atlas is
+        vector<char> gridEdone(6,0);                       //  rolling, so snapshot in passing)
         double t0=now(); size_t leaves=0, maxnk=0, inodes=0;
         for(int k=1;k<=K;++k){
             UPAIRLVL=k;
@@ -691,6 +738,7 @@ int main(int argc,char** argv){
             leaves+=t.ord.size(); inodes+=t.node.size();
             if(t.ord.size()>maxnk) maxnk=t.ord.size();
             for(int i=0;i<6;++i) if(KQ[i]==k && gridW[i].empty()) gridW[i]=t.wOf;
+            for(int i=0;i<6;++i) if(KQ[i]==k && !gridEdone[i]){ gridE[i]=B.le; gridEdone[i]=1; }
         }                                                   // t dies here, every level
         UPAIR=nullptr;
         size_t MT=raw.size();
@@ -752,8 +800,10 @@ int main(int argc,char** argv){
 
         for(int ki=0;ki<6;++ki){
             int k = KQ[ki];
-            /* the level's edges come from the buckets, not from a tree */
+            /* the level's edges come from the bucket snapshot, not from a tree */
             size_t lo=B.loff[k], hi=B.loff[k+1]; if(hi<=lo) continue;
+            if(gridE[ki].size()!=hi-lo){ fprintf(stderr,"snapshot of level %d has %zu "
+                "edges, counted %zu\n",k,gridE[ki].size(),hi-lo); exit(1); }
             vector<ll> ws=gridW[ki]; sort(ws.begin(),ws.end());
             if(ws.empty()) continue;
             for(int qi=1;qi<=7;++qi){
@@ -767,7 +817,7 @@ int main(int argc,char** argv){
                 u64 spent=0;
                 for(int t2=0;t2<uq;++t2){
                     if(ubudget && spent>=ubudget) break;
-                    int e=B.bEdge[lo+(size_t)(rnd()%(hi-lo))];
+                    int e=gridE[ki][(size_t)(rnd()%(hi-lo))];
                     O.probes=0;
                     /* Slot counts are machine independent, but the certificate is what the
                        index actually ships, so its answer has to be priced in seconds too. */
